@@ -142,6 +142,12 @@ private:
   // start, then track changes while frame capturing
   bool RecordUpdateCheck(GLResourceRecord *record);
 
+  // Offscreen/headless capture driving: hosts that never do a windowed present
+  // (e.g. Android emulator host processes rendering to an offscreen surface)
+  // have no frame boundary to poll for capture triggers, so we drive the
+  // capture from frequently-called GL entry points instead.
+  void DriveOffscreenCapture();
+
   // internals
   CaptureState m_State;
   bool m_AppControlledCapture = false;
@@ -149,6 +155,11 @@ private:
   void *m_FirstFrameCaptureContext = NULL;
 
   PerformanceTimer m_CaptureTimer;
+
+  bool m_OffscreenCapturing = false;
+  void *m_OffscreenCaptureDevice = NULL;
+  double m_OffscreenCaptureMs = 100.0;
+  PerformanceTimer m_OffscreenCaptureTimer;
 
   bool m_MarkedActive = false;
 

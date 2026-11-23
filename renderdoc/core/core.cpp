@@ -1122,6 +1122,12 @@ IFrameCapturer *RenderDoc::MatchFrameCapturer(DeviceOwnedWindow devWnd)
   return it->second.FrameCapturer;
 }
 
+bool RenderDoc::HasWindowFrameCapturers()
+{
+  SCOPED_LOCK(m_CapturerListLock);
+  return !m_WindowFrameCapturers.empty();
+}
+
 void RenderDoc::StartFrameCapture(DeviceOwnedWindow devWnd)
 {
   m_CaptureTitle.clear();

@@ -603,6 +603,7 @@ public:
   rdcarray<IFrameCapturer *> GetVulkanBridgeCapturers();
 
   IFrameCapturer *MatchFrameCapturer(DeviceOwnedWindow devWnd);
+  bool HasWindowFrameCapturers();
 
   void StartFrameCapture(DeviceOwnedWindow devWnd);
   bool IsFrameCapturing() { return m_CapturesActive > 0; }

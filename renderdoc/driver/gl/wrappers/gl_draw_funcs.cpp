@@ -1165,6 +1165,8 @@ void WrappedOpenGL::RestoreClientMemoryArrays(ClientMemoryData *clientMemoryArra
 
 void WrappedOpenGL::glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+  DriveOffscreenCapture();
+
   CoherentMapImplicitBarrier();
 
   if(IsBackgroundCapturing(m_State))
@@ -1477,6 +1479,8 @@ bool WrappedOpenGL::Serialise_glDrawElements(SerialiserType &ser, GLenum mode, G
 
 void WrappedOpenGL::glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
+  DriveOffscreenCapture();
+
   CoherentMapImplicitBarrier();
 
   if(IsBackgroundCapturing(m_State))

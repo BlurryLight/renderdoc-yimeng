@@ -1936,6 +1936,8 @@ bool WrappedOpenGL::Serialise_glTextureParameteriEXT(SerialiserType &ser, GLuint
 void WrappedOpenGL::Common_glTextureParameteriEXT(GLResourceRecord *record, GLenum target,
                                                   GLenum pname, GLint param)
 {
+  DriveOffscreenCapture();
+
   if(!record)
   {
     RDCERR(

@@ -27,6 +27,7 @@
 #include <algorithm>
 #include "common/common.h"
 #include "core/settings.h"
+#include "os/os_specific.h"
 #include "driver/shaders/spirv/spirv_compile.h"
 #include "jpeg-compressor/jpge.h"
 #include "serialise/rdcfile.h"
@@ -2689,6 +2690,63 @@ bool WrappedOpenGL::DiscardFrameCapture(DeviceOwnedWindow devWnd)
   m_BackbufferImages.clear();
 
   return true;
+}
+
+void WrappedOpenGL::DriveOffscreenCapture()
+{
+  // Offscreen/headless hosts (e.g. Android emulator host processes that render
+  // to an offscreen surface and share it with a separate presenter process)
+  // never reach a windowed present, so the normal path that polls
+  // ShouldTriggerCapture() during Present is dead and a TriggerCapture from the
+  // UI just times out. Drive the capture from frequently-called GL entry points
+  // instead: start a device-only capture (NULL window, like the first-frame
+  // path) and end it after a short window covering a couple of frames.
+
+  if(m_OffscreenCapturing)
+  {
+    double elapsed = m_OffscreenCaptureTimer.GetMilliseconds();
+    if(elapsed >= m_OffscreenCaptureMs)
+    {
+      m_OffscreenCapturing = false;
+      RDCLOG("Offscreen bridge: ending capture on device %p after %.1fms",
+             m_OffscreenCaptureDevice, elapsed);
+      RenderDoc::Inst().EndFrameCapture(DeviceOwnedWindow(m_OffscreenCaptureDevice, NULL));
+    }
+    return;
+  }
+
+  if(!IsBackgroundCapturing(m_State))
+    return;
+
+  // only take over when there are no windowed capturers - otherwise the normal
+  // present-driven trigger flow owns the capture
+  if(RenderDoc::Inst().HasWindowFrameCapturers())
+    return;
+
+  if(RenderDoc::Inst().ShouldTriggerCapture(0))
+  {
+    void *ctx = GetCtx().ctx;
+    if(ctx == NULL)
+      return;
+
+    m_OffscreenCaptureMs = 100.0;
+    rdcstr env = Process::GetEnvVariable("RENDERDOC_OFFSCREEN_CAPTURE_MS");
+    if(!env.empty())
+    {
+      double v = atof(env.c_str());
+      if(v > 0.0)
+        m_OffscreenCaptureMs = v;
+    }
+
+    m_OffscreenCapturing = true;
+    m_OffscreenCaptureDevice = ctx;
+    m_OffscreenCaptureTimer.Restart();
+
+    RDCLOG("Offscreen bridge: trigger received, starting capture on device %p for %.1fms", ctx,
+           m_OffscreenCaptureMs);
+
+    RenderDoc::Inst().StartFrameCapture(DeviceOwnedWindow(ctx, NULL));
+  }
 }
 
 void WrappedOpenGL::FirstFrame(void *ctx, void *wndHandle)
