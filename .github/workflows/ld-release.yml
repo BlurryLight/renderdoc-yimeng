@@ -97,22 +97,25 @@ jobs:
       shell: powershell
       run: |
         curl.exe -L https://github.com/Yi-Meng/renderdoc/releases/download/v1.47/RenderDoc_1.47_YiMeng_64.zip -o YiMeng.zip
-        Expand-Archive YiMeng.zip -DestinationPath release -Force
+        Expand-Archive YiMeng.zip -DestinationPath ym -Force
+        # the official zip has a top-level folder - use it as the release root
+        $rel = (Get-ChildItem ym -Directory | Select-Object -First 1).FullName
+        if(-not (Test-Path "$rel\renderdoc.dll")) { throw "unexpected YiMeng zip layout" }
 
         # overlay the freshly built injection components
-        Copy-Item x64\Release\renderdoc.dll release\renderdoc.dll -Force
-        Copy-Item x64\Release\renderdoccmd.exe release\renderdoccmd.exe -Force
-        Copy-Item x64\Release\renderdocshim64.dll release\renderdocshim64.dll -Force
-        Copy-Item x64\Release\renderdoc.json release\renderdoc.json -Force
-        Copy-Item x86\Release\renderdoc.dll release\x86\renderdoc.dll -Force
-        Copy-Item x86\Release\renderdoccmd.exe release\x86\renderdoccmd.exe -Force
-        Copy-Item x86\Release\renderdocshim32.dll release\x86\renderdocshim32.dll -Force
-        Copy-Item x86\Release\renderdoc.json release\x86\renderdoc.json -Force
+        Copy-Item x64\Release\renderdoc.dll "$rel\renderdoc.dll" -Force
+        Copy-Item x64\Release\renderdoccmd.exe "$rel\renderdoccmd.exe" -Force
+        Copy-Item x64\Release\renderdocshim64.dll "$rel\renderdocshim64.dll" -Force
+        Copy-Item x64\Release\renderdoc.json "$rel\renderdoc.json" -Force
+        Copy-Item x86\Release\renderdoc.dll "$rel\x86\renderdoc.dll" -Force
+        Copy-Item x86\Release\renderdoccmd.exe "$rel\x86\renderdoccmd.exe" -Force
+        Copy-Item x86\Release\renderdocshim32.dll "$rel\x86\renderdocshim32.dll" -Force
+        Copy-Item x86\Release\renderdoc.json "$rel\x86\renderdoc.json" -Force
 
         $sha = git rev-parse --short HEAD
         $fname = "RenderDoc_1.47_LD_64_$sha.zip"
         if(Test-Path $fname) { Remove-Item $fname -Force }
-        7z a -tzip $fname .\release\* | Out-Null
+        7z a -tzip $fname $rel | Out-Null
         "FNAME=$fname" | Out-File -FilePath $env:GITHUB_ENV -Append
         Get-Item $fname | Select-Object Name,Length
 
