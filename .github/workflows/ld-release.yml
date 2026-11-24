@@ -86,6 +86,10 @@ jobs:
               <DebugInformationFormat>None</DebugInformationFormat>
               <PrecompiledHeader>NotUsing</PrecompiledHeader>
               <WholeProgramOptimization>false</WholeProgramOptimization>
+              <!-- sources #include "precompiled.h" directly; without the /Yu
+                   interception they resolve it through the include path, and
+                   the file sits in each project's own directory -->
+              <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
             </ClCompile>
             <Link>
               <GenerateDebugInformation>false</GenerateDebugInformation>
@@ -146,6 +150,17 @@ jobs:
       run: |
         sccache --show-stats
         sccache --stop-server
+
+    # When any of the build/verify steps fails, open an interactive tmate
+    # session and print the SSH connection details to the log so the failure
+    # can be debugged live on the runner. The job stays up for the duration
+    # of the session (or the step timeout).
+    - name: Debug session on failure (tmate)
+      if: failure()
+      uses: mxschmitt/action-tmate@v3
+      with:
+        limit-access-to-actor: false
+      timeout-minutes: 30
 
     - name: Verify toolset used for the build
       shell: cmd
