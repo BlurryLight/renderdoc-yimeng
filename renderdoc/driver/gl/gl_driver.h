@@ -166,11 +166,14 @@ private:
   bool m_OffscreenEndPending = false;
   bool m_OffscreenStartPending = false;
   void *m_OffscreenCaptureDevice = NULL;
-  // safety net only: the capture normally ends after m_OffscreenPresentTarget
-  // presents (frame boundaries), not after a wall-clock duration. A fixed
-  // duration is wrong here because saving the initial resource state can take
-  // longer than the window and then only a slice of a frame is recorded.
-  double m_OffscreenCaptureMs = 60000.0;
+  // minimum amount of *rendering* time (measured after the initial state
+  // snapshot has been written, which can take seconds for large captures) that
+  // must be recorded before the capture may end. A fixed wall-clock window
+  // measured from StartFrameCapture is wrong: the snapshot eats most of it and
+  // then only a slice of a frame gets recorded.
+  double m_OffscreenCaptureMs = 3000.0;
+  // hard safety net so a host that stops presenting can't leave us capturing
+  double m_OffscreenSafetyMs = 60000.0;
   uint32_t m_OffscreenPresentCount = 0;
   uint32_t m_OffscreenPresentTarget = 2;
   PerformanceTimer m_OffscreenCaptureTimer;

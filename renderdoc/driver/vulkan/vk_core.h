@@ -1183,6 +1183,16 @@ private:
   void StartVulkanBridgeCaptures();
   void EndVulkanBridgeCaptures();
 
+  // offscreen/emulator hosts have no present, so nothing polls the capture
+  // trigger. Drive it from the queue submission path instead.
+  void DriveOffscreenVulkanCapture();
+  void BeginOffscreenVulkanCapture();
+  void EndOffscreenVulkanCapture();
+
+  bool m_OffscreenVulkanCapturing = false;
+  double m_OffscreenVulkanMs = 3000.0;
+  PerformanceTimer m_OffscreenVulkanTimer;
+
   void HandleFrameMarkers(const char *marker, VkCommandBuffer commandBuffer);
   void HandleFrameMarkers(const char *marker, VkQueue queue);
 

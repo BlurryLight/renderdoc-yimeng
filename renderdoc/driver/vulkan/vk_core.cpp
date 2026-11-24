@@ -3659,6 +3659,71 @@ void WrappedVulkan::EndVulkanBridgeCaptures()
   }
 }
 
+void WrappedVulkan::BeginOffscreenVulkanCapture()
+{
+  m_OffscreenVulkanCapturing = true;
+
+  m_OffscreenVulkanMs = 3000.0;
+  rdcstr env = Process::GetEnvVariable("RENDERDOC_OFFSCREEN_CAPTURE_MS");
+  if(!env.empty())
+  {
+    double v = atof(env.c_str());
+    if(v > 0.0)
+      m_OffscreenVulkanMs = v;
+  }
+
+  RDCLOG("Vulkan bridge: offscreen trigger received, starting capture on capturer %p for %.0fms of "
+         "rendering",
+         this, m_OffscreenVulkanMs);
+
+  RenderDoc::Inst().StartFrameCapture(DeviceOwnedWindow(LayerDisp(m_Instance), NULL));
+  StartVulkanBridgeCaptures();
+
+  m_AppControlledCapture = false;
+  if(!m_CapturedFrames.empty())
+    m_CapturedFrames.back().frameNumber = m_FrameCounter;
+
+  // start the timer after StartFrameCapture - serialising the initial resource
+  // state happens in there and can take seconds for a big capture, which is
+  // exactly what used to truncate the frame after only a slice was recorded.
+  m_OffscreenVulkanTimer.Restart();
+}
+
+void WrappedVulkan::EndOffscreenVulkanCapture()
+{
+  m_OffscreenVulkanCapturing = false;
+
+  RDCLOG("Vulkan bridge: offscreen capture ending after %.0fms of rendering",
+         m_OffscreenVulkanTimer.GetMilliseconds());
+
+  RenderDoc::Inst().EndFrameCapture(DeviceOwnedWindow(LayerDisp(m_Instance), NULL));
+  EndVulkanBridgeCaptures();
+}
+
+void WrappedVulkan::DriveOffscreenVulkanCapture()
+{
+  // Emulator/offscreen hosts render into a shared surface and never present, so
+  // the present-driven trigger poll in Present() is dead and a capture trigger
+  // would just time out. Poll it here instead: vkQueueSubmit is the most
+  // frequently hit entry point that always exists on such a host.
+  if(m_OffscreenVulkanCapturing)
+  {
+    if(m_OffscreenVulkanTimer.GetMilliseconds() >= m_OffscreenVulkanMs)
+      EndOffscreenVulkanCapture();
+    return;
+  }
+
+  // normal windowed apps are handled by the present path
+  if(RenderDoc::Inst().HasWindowFrameCapturers())
+    return;
+
+  if(!IsBackgroundCapturing(m_State))
+    return;
+
+  if(RenderDoc::Inst().ShouldTriggerCapture(0))
+    BeginOffscreenVulkanCapture();
+}
+
 void WrappedVulkan::HandleFrameMarkers(const char *marker, VkCommandBuffer commandBuffer)
 {
   if(!marker)

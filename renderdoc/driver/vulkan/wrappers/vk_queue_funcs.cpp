@@ -1405,6 +1405,8 @@ VkResult WrappedVulkan::vkQueueSubmit(VkQueue queue, uint32_t submitCount,
 {
   SCOPED_DBG_SINK();
 
+  DriveOffscreenVulkanCapture();
+
   if(HasFatalError())
     return VK_ERROR_DEVICE_LOST;
 
@@ -1595,6 +1597,8 @@ VkResult WrappedVulkan::vkQueueSubmit2(VkQueue queue, uint32_t submitCount,
                                        const VkSubmitInfo2 *pSubmits, VkFence fence)
 {
   SCOPED_DBG_SINK();
+
+  DriveOffscreenVulkanCapture();
 
   if(HasFatalError())
     return VK_ERROR_DEVICE_LOST;
