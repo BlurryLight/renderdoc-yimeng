@@ -9,15 +9,12 @@ name: LD Release
 #
 # Only the injection components are rebuilt (breakpad, renderdoc.dll,
 # renderdoccmd, renderdocshim) for x64 and x86 - the UI and everything else
-# is taken from the official YiMeng v1.47 release. Compile results are cached
-# with sccache so that source changes rebuild quickly.
+# is taken from the official YiMeng v1.47 release, which is fine on a normal
+# desktop. This keeps the build fast: no Qt, no UI.
 #
-# CI-only tweaks applied via Directory.Build.targets (written by a step
-# below, not committed): no /Zi debug info (sccache cannot cache /Zi, and the
-# release ships no pdb anyway), no precompiled headers (sccache does not
-# cache PCH-using TUs), no /GL LTCG (a plain link is several minutes faster
-# than an LTCG link of 1.9GB of objects). None of these change runtime
-# behaviour.
+# The resulting zip is a complete YiMeng v1.47 release with the injection
+# components rebuilt from this branch (v1.47 + LDPlayer offscreen capture
+# patches).
 
 on:
   push:
@@ -32,7 +29,7 @@ jobs:
   build:
     name: v142 (MSVC 14.29) LDPlayer-compatible build
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
     - uses: actions/checkout@v6
@@ -49,118 +46,27 @@ jobs:
     - name: Set up MSBuild
       uses: microsoft/setup-msbuild@v3
 
-    - name: Install sccache
+    - name: Build injection components (x64 + x86, no UI)
       shell: powershell
       run: |
-        curl.exe -L -o sccache.zip https://github.com/mozilla/sccache/releases/download/v0.20.0/sccache-v0.20.0-x86_64-pc-windows-msvc.zip
-        7z x sccache.zip -y -osccache-bin | Out-Null
-        $exe = Get-ChildItem sccache-bin -Recurse -Filter sccache.exe | Select-Object -First 1
-        Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
-        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_BIN_DIR=$($exe.DirectoryName)"
-        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_DIR=$env:RUNNER_TEMP\sccache"
-        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_CACHE_SIZE=8G"
-        # sccache is a multi-call binary: a copy named cl.exe acts as
-        # "sccache cl.exe <args>" and resolves the real cl.exe from PATH.
-        # MSBuild's CLToolExe has no way to pass the compiler as an argument,
-        # so this is how sccache is hooked into msbuild.
-        New-Item -ItemType Directory -Force sccache-wrap | Out-Null
-        Copy-Item $exe.FullName sccache-wrap\cl.exe -Force
-        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_WRAP_DIR=$PWD\sccache-wrap"
-        "sccache at $($exe.FullName), cl.exe wrapper at $PWD\sccache-wrap\cl.exe"
-
-    - name: Cache sccache data
-      uses: actions/cache@v4
-      with:
-        path: ${{ runner.temp }}/sccache
-        key: sccache-v142-1429-${{ github.sha }}
-        restore-keys: |
-          sccache-v142-1429-
-
-    - name: Apply CI-only build tweaks (no /Zi, no PCH, no LTCG)
-      shell: powershell
-      run: |
-        @'
-        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-          <ItemDefinitionGroup>
-            <ClCompile>
-              <DebugInformationFormat>None</DebugInformationFormat>
-              <PrecompiledHeader>NotUsing</PrecompiledHeader>
-              <WholeProgramOptimization>false</WholeProgramOptimization>
-              <!-- sources #include "precompiled.h" directly; without the /Yu
-                   interception they resolve it through the include path, and
-                   the file sits in each project's own directory -->
-              <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-            </ClCompile>
-            <Link>
-              <GenerateDebugInformation>false</GenerateDebugInformation>
-            </Link>
-          </ItemDefinitionGroup>
-        </Project>
-        '@ | Out-File -FilePath Directory.Build.targets -Encoding ascii
-
-    - name: Build x64 injection components (sccache)
-      shell: cmd
-      run: |
-        rem locate the Community instance with the 14.29 toolset
-        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSCOMM=%%i
-        for /d %%d in ("%VSCOMM%\VC\Tools\MSVC\14.29*") do set TS=%%d
-        if "%TS%"=="" ( echo ERROR: 14.29 toolset not found & exit /b 1 )
-        for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0" /v ProductVersion 2^>nul') do set SDKRAW=%%b
-        set SDK=%SDKRAW%.0
-        set KITS=%ProgramFiles(x86)%\Windows Kits\10
-        rem minimal dev env so sccache can locate and drive cl.exe directly
-        set PATH=%TS%\bin\Hostx64\x64;%PATH%
-        set INCLUDE=%TS%\include;%KITS%\Include\%SDK%\ucrt;%KITS%\Include\%SDK%\um;%KITS%\Include\%SDK%\shared;%KITS%\Include\%SDK%\winrt;%KITS%\Include\%SDK%\cppwinrt
-        set LIB=%TS%\lib\x64;%KITS%\Lib\%SDK%\ucrt\x64;%KITS%\Lib\%SDK%\um\x64
-        cl 2>&1 | findstr /C:"Version" || exit /b 1
-        sccache --start-server || exit /b 1
-        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:CLToolExe=cl.exe /p:CLToolPath="%SCCACHE_WRAP_DIR%"
-        for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
-          msbuild %%p %MSB% || exit /b 1
+        $bp = @(
+          "renderdoc\3rdparty\breakpad\client\windows\common.vcxproj",
+          "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj",
+          "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj",
+          "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj"
         )
-        msbuild renderdoc\renderdoc.vcxproj %MSB% || exit /b 1
-        msbuild renderdoccmd\renderdoccmd.vcxproj %MSB% || exit /b 1
-        msbuild renderdocshim\renderdocshim.vcxproj %MSB% || exit /b 1
-
-    - name: Build x86 injection components (sccache)
-      shell: cmd
-      run: |
-        rem locate the Community instance with the 14.29 toolset
-        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSCOMM=%%i
-        for /d %%d in ("%VSCOMM%\VC\Tools\MSVC\14.29*") do set TS=%%d
-        if "%TS%"=="" ( echo ERROR: 14.29 toolset not found & exit /b 1 )
-        for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0" /v ProductVersion 2^>nul') do set SDKRAW=%%b
-        set SDK=%SDKRAW%.0
-        set KITS=%ProgramFiles(x86)%\Windows Kits\10
-        rem minimal dev env (x86 target, x64 hosted cross tools)
-        set PATH=%TS%\bin\Hostx64\x86;%PATH%
-        set INCLUDE=%TS%\include;%KITS%\Include\%SDK%\ucrt;%KITS%\Include\%SDK%\um;%KITS%\Include\%SDK%\shared;%KITS%\Include\%SDK%\winrt;%KITS%\Include\%SDK%\cppwinrt
-        set LIB=%TS%\lib\x86;%KITS%\Lib\%SDK%\ucrt\x86;%KITS%\Lib\%SDK%\um\x86
-        cl 2>&1 | findstr /C:"Version" || exit /b 1
-        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142 /p:CLToolExe=cl.exe /p:CLToolPath="%SCCACHE_WRAP_DIR%"
-        for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
-          msbuild %%p %MSB% || exit /b 1
-        )
-        msbuild renderdoc\renderdoc.vcxproj %MSB% || exit /b 1
-        msbuild renderdoccmd\renderdoccmd.vcxproj %MSB% || exit /b 1
-        msbuild renderdocshim\renderdocshim.vcxproj %MSB% || exit /b 1
-
-    - name: Show sccache stats
-      shell: cmd
-      run: |
-        sccache --show-stats
-        sccache --stop-server
-
-    # When any of the build/verify steps fails, open an interactive tmate
-    # session and print the SSH connection details to the log so the failure
-    # can be debugged live on the runner. The job stays up for the duration
-    # of the session (or the step timeout).
-    - name: Debug session on failure (tmate)
-      if: failure()
-      uses: mxschmitt/action-tmate@v3
-      with:
-        limit-access-to-actor: false
-      timeout-minutes: 30
+        foreach($platform in @("x64", "x86")) {
+          foreach($p in $bp) {
+            msbuild $p /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
+            if($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          msbuild renderdoc\renderdoc.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
+          if($LASTEXITCODE -ne 0) { exit 1 }
+          msbuild renderdoccmd\renderdoccmd.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
+          if($LASTEXITCODE -ne 0) { exit 1 }
+          msbuild renderdocshim\renderdocshim.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
+          if($LASTEXITCODE -ne 0) { exit 1 }
+        }
 
     - name: Verify toolset used for the build
       shell: cmd
@@ -187,18 +93,10 @@ jobs:
         x64\Release\renderdoccmd.exe version
         if($LASTEXITCODE -ne 0) { exit 1 }
 
-    - name: Cache the YiMeng official zip
-      uses: actions/cache@v4
-      with:
-        path: YiMeng.zip
-        key: yimeng-v1.47-64
-
     - name: Assemble complete LD release (overlay on the official YiMeng v1.47 zip)
       shell: powershell
       run: |
-        if(-not (Test-Path YiMeng.zip)) {
-          curl.exe -L https://github.com/Yi-Meng/renderdoc/releases/download/v1.47/RenderDoc_1.47_YiMeng_64.zip -o YiMeng.zip
-        }
+        curl.exe -L https://github.com/Yi-Meng/renderdoc/releases/download/v1.47/RenderDoc_1.47_YiMeng_64.zip -o YiMeng.zip
         Expand-Archive YiMeng.zip -DestinationPath release -Force
 
         # overlay the freshly built injection components
@@ -215,8 +113,18 @@ jobs:
         $fname = "RenderDoc_1.47_LD_64_$sha.zip"
         if(Test-Path $fname) { Remove-Item $fname -Force }
         7z a -tzip $fname .\release\* | Out-Null
-        Add-Content -Path $env:GITHUB_ENV -Value "FNAME=$fname"
+        "FNAME=$fname" | Out-File -FilePath $env:GITHUB_ENV -Append
         Get-Item $fname | Select-Object Name,Length
+
+    # On any build/verify failure, open an interactive tmate session so the
+    # runner can be inspected live (connection details are printed in the job
+    # log). The step ends when the session is closed or after 30 minutes.
+    - name: Debug session on failure (tmate)
+      if: failure()
+      uses: mxschmitt/action-tmate@v3
+      with:
+        limit-access-to-actor: false
+      timeout-minutes: 30
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v4
