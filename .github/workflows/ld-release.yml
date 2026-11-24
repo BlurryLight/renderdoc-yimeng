@@ -102,15 +102,25 @@ jobs:
         $rel = (Get-ChildItem ym -Directory | Select-Object -First 1).FullName
         if(-not (Test-Path "$rel\renderdoc.dll")) { throw "unexpected YiMeng zip layout" }
 
+        # note: the vcxproj outputs the x86 platform into Win32\Release (VS convention)
+        $x64 = "x64\Release"
+        $x86 = "Win32\Release"
+        foreach($f in @("$x64\renderdoc.dll","$x64\renderdoccmd.exe","$x64\renderdocshim64.dll","$x64\renderdoc.json",
+                        "$x86\renderdoc.dll","$x86\renderdoccmd.exe","$x86\renderdoc.json")) {
+          if(-not (Test-Path $f)) { throw "missing build output: $f" }
+        }
+
         # overlay the freshly built injection components
-        Copy-Item x64\Release\renderdoc.dll "$rel\renderdoc.dll" -Force
-        Copy-Item x64\Release\renderdoccmd.exe "$rel\renderdoccmd.exe" -Force
-        Copy-Item x64\Release\renderdocshim64.dll "$rel\renderdocshim64.dll" -Force
-        Copy-Item x64\Release\renderdoc.json "$rel\renderdoc.json" -Force
-        Copy-Item x86\Release\renderdoc.dll "$rel\x86\renderdoc.dll" -Force
-        Copy-Item x86\Release\renderdoccmd.exe "$rel\x86\renderdoccmd.exe" -Force
-        Copy-Item x86\Release\renderdocshim32.dll "$rel\x86\renderdocshim32.dll" -Force
-        Copy-Item x86\Release\renderdoc.json "$rel\x86\renderdoc.json" -Force
+        Copy-Item "$x64\renderdoc.dll" "$rel\renderdoc.dll" -Force
+        Copy-Item "$x64\renderdoccmd.exe" "$rel\renderdoccmd.exe" -Force
+        Copy-Item "$x64\renderdocshim64.dll" "$rel\renderdocshim64.dll" -Force
+        Copy-Item "$x64\renderdoc.json" "$rel\renderdoc.json" -Force
+        Copy-Item "$x86\renderdoc.dll" "$rel\x86\renderdoc.dll" -Force
+        Copy-Item "$x86\renderdoccmd.exe" "$rel\x86\renderdoccmd.exe" -Force
+        $shim86 = Get-ChildItem "$x86\renderdocshim*.dll" | Select-Object -First 1
+        if(-not $shim86) { throw "missing x86 shim dll" }
+        Copy-Item $shim86.FullName "$rel\x86\renderdocshim32.dll" -Force
+        Copy-Item "$x86\renderdoc.json" "$rel\x86\renderdoc.json" -Force
 
         $sha = git rev-parse --short HEAD
         $fname = "RenderDoc_1.47_LD_64_$sha.zip"
@@ -118,16 +128,6 @@ jobs:
         7z a -tzip $fname $rel | Out-Null
         "FNAME=$fname" | Out-File -FilePath $env:GITHUB_ENV -Append
         Get-Item $fname | Select-Object Name,Length
-
-    # On any build/verify failure, open an interactive tmate session so the
-    # runner can be inspected live (connection details are printed in the job
-    # log). The step ends when the session is closed or after 30 minutes.
-    - name: Debug session on failure (tmate)
-      if: failure()
-      uses: mxschmitt/action-tmate@v3
-      with:
-        limit-access-to-actor: false
-      timeout-minutes: 30
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v4
