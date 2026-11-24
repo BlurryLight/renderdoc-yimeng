@@ -1,0 +1,157 @@
+name: LD Release
+
+# Builds RenderDoc with the MSVC v142 (14.29) toolset - the same toolchain
+# generation as the VC runtime that LDPlayer preloads in its host processes
+# (MSVCP140/VCRUNTIME140 14.29.30151 from C:\Program Files\ldplayer9box).
+# A build made with this toolset initialises cleanly inside Ld9BoxHeadless /
+# dnplayer, so the import-table renaming workaround is not needed.
+#
+# The resulting zip is a complete YiMeng v1.47 release with the injection
+# components rebuilt from this branch (v1.47 + LDPlayer offscreen capture
+# patches).
+
+on:
+  push:
+    branches:
+      - LD
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: v142 (MSVC 14.29) LDPlayer-compatible build
+    runs-on: windows-2025
+    timeout-minutes: 150
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 5
+
+    - name: Install MSVC v142 14.29 toolset
+      shell: powershell
+      run: |
+        winget install Microsoft.VisualStudio.2022.Community `
+          --accept-source-agreements --accept-package-agreements --silent `
+          --override "--wait --quiet --add ProductLang En-us --add Microsoft.VisualStudio.Component.VC.14.29.17.11.x86.x64"
+
+    - name: Download optional 3rdparty extras (Qt/PySide for the UI)
+      shell: powershell
+      run: |
+        curl.exe -L https://renderdoc.org/qrenderdoc_3rdparty.zip -o qrenderdoc_3rdparty.zip
+        7z x qrenderdoc_3rdparty.zip
+
+    - name: Set up MSBuild
+      uses: microsoft/setup-msbuild@v3
+
+    - name: Build x64 Release (full solution, incl. UI)
+      shell: powershell
+      run: |
+        msbuild renderdoc.sln /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142
+
+    - name: Build x86 Release (injection components)
+      shell: powershell
+      run: |
+        $bp = @(
+          "renderdoc\3rdparty\breakpad\client\windows\common.vcxproj",
+          "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj",
+          "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj",
+          "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj"
+        )
+        foreach($p in $bp) {
+          msbuild $p /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142
+          if($LASTEXITCODE -ne 0) { exit 1 }
+        }
+        msbuild renderdoc\renderdoc.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142
+        if($LASTEXITCODE -ne 0) { exit 1 }
+        msbuild renderdoccmd\renderdoccmd.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142
+        if($LASTEXITCODE -ne 0) { exit 1 }
+        msbuild renderdocshim\renderdocshim.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142
+        if($LASTEXITCODE -ne 0) { exit 1 }
+
+    - name: Verify CRT compatibility of the built dll
+      shell: cmd
+      run: |
+        rem dumpbin lives in the VS dev environment - locate it via vswhere
+        for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
+        set DUMPBIN=%VSPATH%\VC\Tools\MSVC\14.29*\bin\Hostx64\x64\dumpbin.exe
+        @echo on
+        dir /b "%VSPATH%\VC\Tools\MSVC"
+        for %%d in ("%VSPATH%\VC\Tools\MSVC\14.29*") do set TOOLSET=%%~nxd
+        @echo Using MSVC toolset: %TOOLSET%
+        "%VSPATH%\VC\Tools\MSVC\%TOOLSET%\bin\Hostx64\x64\dumpbin.exe" /dependents x64\Release\renderdoc.dll
+
+        "%VSPATH%\VC\Tools\MSVC\%TOOLSET%\bin\Hostx64\x64\dumpbin.exe" /dependents x64\Release\renderdoc.dll | findstr /i "VCRUNTIME140_1.dll" && (
+          echo ERROR: built dll imports VCRUNTIME140_1.dll - toolchain is too new for LDPlayer's 14.29 runtime & exit /b 1
+        ) || echo OK: no VCRUNTIME140_1 import - compatible with LDPlayer's bundled runtime
+
+    - name: Sanity-run the built cmd
+      shell: powershell
+      run: |
+        x64\Release\renderdoccmd.exe version
+        if($LASTEXITCODE -ne 0) { exit 1 }
+
+    - name: Assemble complete LD release (overlay on the official YiMeng v1.47 zip)
+      shell: powershell
+      run: |
+        curl.exe -L https://github.com/Yi-Meng/renderdoc/releases/download/v1.47/RenderDoc_1.47_YiMeng_64.zip -o YiMeng.zip
+        7z x YiMeng.zip -oldir release
+
+        # overlay the freshly built injection components
+        copy x64\Release\renderdoc.dll release\renderdoc.dll /Y
+        copy x64\Release\renderdoccmd.exe release\renderdoccmd.exe /Y
+        copy x64\Release\renderdocshim64.dll release\renderdocshim64.dll /Y
+        copy x64\Release\renderdoc.json release\renderdoc.json /Y
+        copy x86\Release\renderdoc.dll release\x86\renderdoc.dll /Y
+        copy x86\Release\renderdoccmd.exe release\x86\renderdoccmd.exe /Y
+        copy x86\Release\renderdocshim32.dll release\x86\renderdocshim32.dll /Y
+        copy x86\Release\renderdoc.json release\x86\renderdoc.json /Y
+
+        $sha = git rev-parse --short HEAD
+        $fname = "RenderDoc_1.47_LD_64_$sha.zip"
+        7z a -tzip $fname release
+        "FNAME=$fname" | Out-File -FilePath $env:GITHUB_ENV -Append
+        dir $fname
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.FNAME }}
+        path: ${{ env.FNAME }}
+
+    - name: Create release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: LD-v1.47-${{ github.sha }}
+        name: RenderDoc v1.47 LD build (MSVC 14.29 toolset)
+        prerelease: true
+        files: ${{ env.FNAME }}
+        body: |
+          Complete RenderDoc v1.47 YiMeng release with injection components
+          rebuilt with the MSVC v142 14.29 toolset, matching the VC runtime
+          bundled by LDPlayer (14.29.30151). No import-table renaming needed.
+
+          Built from commit ${{ github.sha }} which includes the LDPlayer
+          offscreen capture patches:
+
+          - Offscreen/headless capture driving for GL (no windowed present:
+            high-traffic GL entry points poll for the capture trigger and run
+            a device-only Start/EndFrameCapture with NULL/NULL window).
+          - Vulkan bridge captures driven from the offscreen GL trigger: the
+            real game drawing on the host-side Vulkan instances is captured
+            together with the outer GL composition.
+          - 1200ms capture window (RENDERDOC_OFFSCREEN_CAPTURE_MS env var to
+            override), ending on the next glFinish/glFlush frame tick.
+
+          Usage on LDPlayer (see the project docs for details):
+
+          1. Register the Vulkan implicit layer pointing at the renderdoc.json
+             inside this folder (the injection dll only sets the enable
+             environment variable, the loader needs the registry entry):
+             reg add "HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers" /v "<path>\renderdoc.json" /t REG_DWORD /d 0 /f
+          2. Start the emulator with RenderDoc injected early into
+             Ld9BoxHeadless.exe / dnplayer.exe (e.g. a watcher script that
+             injects as soon as the process appears).
+          3. Launch the game, then trigger the capture through target control.
