@@ -90,8 +90,17 @@ jobs:
     - name: Build x64 injection components (sccache)
       shell: cmd
       run: |
+        rem locate the Community instance with the 14.29 toolset
         for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products Microsoft.VisualStudio.Product.Community -property installationPath`) do set VSCOMM=%%i
-        call "%VSCOMM%\Common7\Tools\VsDevCmd.bat" -arch=x64 -vcvars_ver=14.29 || exit /b 1
+        for /d %%d in ("%VSCOMM%\VC\Tools\MSVC\14.29*") do set TS=%%d
+        if "%TS%"=="" ( echo ERROR: 14.29 toolset not found & exit /b 1 )
+        for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0" /v ProductVersion 2^>nul') do set SDKRAW=%%b
+        set SDK=%SDKRAW%.0
+        set KITS=%ProgramFiles(x86)%\Windows Kits\10
+        rem minimal dev env so sccache can locate and drive cl.exe directly
+        set PATH=%TS%\bin\Hostx64\x64;%PATH%
+        set INCLUDE=%TS%\include;%KITS%\Include\%SDK%\ucrt;%KITS%\Include\%SDK%\um;%KITS%\Include\%SDK%\shared;%KITS%\Include\%SDK%\winrt;%KITS%\Include\%SDK%\cppwinrt
+        set LIB=%TS%\lib\x64;%KITS%\Lib\%SDK%\ucrt\x64;%KITS%\Lib\%SDK%\um\x64
         cl 2>&1 | findstr /C:"Version" || exit /b 1
         sccache --start-server || exit /b 1
         set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:CLToolExe=sccache.exe /p:CLToolPath="%SCCACHE_BIN_DIR%"
@@ -105,8 +114,17 @@ jobs:
     - name: Build x86 injection components (sccache)
       shell: cmd
       run: |
+        rem locate the Community instance with the 14.29 toolset
         for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products Microsoft.VisualStudio.Product.Community -property installationPath`) do set VSCOMM=%%i
-        call "%VSCOMM%\Common7\Tools\VsDevCmd.bat" -arch=x86 -vcvars_ver=14.29 || exit /b 1
+        for /d %%d in ("%VSCOMM%\VC\Tools\MSVC\14.29*") do set TS=%%d
+        if "%TS%"=="" ( echo ERROR: 14.29 toolset not found & exit /b 1 )
+        for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0" /v ProductVersion 2^>nul') do set SDKRAW=%%b
+        set SDK=%SDKRAW%.0
+        set KITS=%ProgramFiles(x86)%\Windows Kits\10
+        rem minimal dev env (x86 target, x64 hosted cross tools)
+        set PATH=%TS%\bin\Hostx64\x86;%PATH%
+        set INCLUDE=%TS%\include;%KITS%\Include\%SDK%\ucrt;%KITS%\Include\%SDK%\um;%KITS%\Include\%SDK%\shared;%KITS%\Include\%SDK%\winrt;%KITS%\Include\%SDK%\cppwinrt
+        set LIB=%TS%\lib\x86;%KITS%\Lib\%SDK%\ucrt\x86;%KITS%\Lib\%SDK%\um\x86
         cl 2>&1 | findstr /C:"Version" || exit /b 1
         set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142 /p:CLToolExe=sccache.exe /p:CLToolPath="%SCCACHE_BIN_DIR%"
         for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
