@@ -91,7 +91,7 @@ jobs:
       shell: cmd
       run: |
         rem locate the Community instance with the 14.29 toolset
-        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products Microsoft.VisualStudio.Product.Community -property installationPath`) do set VSCOMM=%%i
+        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSCOMM=%%i
         for /d %%d in ("%VSCOMM%\VC\Tools\MSVC\14.29*") do set TS=%%d
         if "%TS%"=="" ( echo ERROR: 14.29 toolset not found & exit /b 1 )
         for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0" /v ProductVersion 2^>nul') do set SDKRAW=%%b
@@ -115,7 +115,7 @@ jobs:
       shell: cmd
       run: |
         rem locate the Community instance with the 14.29 toolset
-        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products Microsoft.VisualStudio.Product.Community -property installationPath`) do set VSCOMM=%%i
+        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSCOMM=%%i
         for /d %%d in ("%VSCOMM%\VC\Tools\MSVC\14.29*") do set TS=%%d
         if "%TS%"=="" ( echo ERROR: 14.29 toolset not found & exit /b 1 )
         for /f "tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0" /v ProductVersion 2^>nul') do set SDKRAW=%%b
