@@ -59,7 +59,14 @@ jobs:
         Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_BIN_DIR=$($exe.DirectoryName)"
         Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_DIR=$env:RUNNER_TEMP\sccache"
         Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_CACHE_SIZE=8G"
-        "sccache at $($exe.FullName)"
+        # sccache is a multi-call binary: a copy named cl.exe acts as
+        # "sccache cl.exe <args>" and resolves the real cl.exe from PATH.
+        # MSBuild's CLToolExe has no way to pass the compiler as an argument,
+        # so this is how sccache is hooked into msbuild.
+        New-Item -ItemType Directory -Force sccache-wrap | Out-Null
+        Copy-Item $exe.FullName sccache-wrap\cl.exe -Force
+        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_WRAP_DIR=$PWD\sccache-wrap"
+        "sccache at $($exe.FullName), cl.exe wrapper at $PWD\sccache-wrap\cl.exe"
 
     - name: Cache sccache data
       uses: actions/cache@v4
@@ -103,7 +110,7 @@ jobs:
         set LIB=%TS%\lib\x64;%KITS%\Lib\%SDK%\ucrt\x64;%KITS%\Lib\%SDK%\um\x64
         cl 2>&1 | findstr /C:"Version" || exit /b 1
         sccache --start-server || exit /b 1
-        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:CLToolExe=sccache.exe /p:CLToolPath="%SCCACHE_BIN_DIR%"
+        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:CLToolExe=cl.exe /p:CLToolPath="%SCCACHE_WRAP_DIR%"
         for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
           msbuild %%p %MSB% || exit /b 1
         )
@@ -126,7 +133,7 @@ jobs:
         set INCLUDE=%TS%\include;%KITS%\Include\%SDK%\ucrt;%KITS%\Include\%SDK%\um;%KITS%\Include\%SDK%\shared;%KITS%\Include\%SDK%\winrt;%KITS%\Include\%SDK%\cppwinrt
         set LIB=%TS%\lib\x86;%KITS%\Lib\%SDK%\ucrt\x86;%KITS%\Lib\%SDK%\um\x86
         cl 2>&1 | findstr /C:"Version" || exit /b 1
-        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142 /p:CLToolExe=sccache.exe /p:CLToolPath="%SCCACHE_BIN_DIR%"
+        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142 /p:CLToolExe=cl.exe /p:CLToolPath="%SCCACHE_WRAP_DIR%"
         for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
           msbuild %%p %MSB% || exit /b 1
         )
