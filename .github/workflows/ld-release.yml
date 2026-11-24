@@ -9,12 +9,15 @@ name: LD Release
 #
 # Only the injection components are rebuilt (breakpad, renderdoc.dll,
 # renderdoccmd, renderdocshim) for x64 and x86 - the UI and everything else
-# is taken from the official YiMeng v1.47 release, which is fine on a normal
-# desktop. This keeps the build fast: no Qt, no UI.
+# is taken from the official YiMeng v1.47 release. Compile results are cached
+# with sccache so that source changes rebuild quickly.
 #
-# The resulting zip is a complete YiMeng v1.47 release with the injection
-# components rebuilt from this branch (v1.47 + LDPlayer offscreen capture
-# patches).
+# CI-only tweaks applied via Directory.Build.targets (written by a step
+# below, not committed): no /Zi debug info (sccache cannot cache /Zi, and the
+# release ships no pdb anyway), no precompiled headers (sccache does not
+# cache PCH-using TUs), no /GL LTCG (a plain link is several minutes faster
+# than an LTCG link of 1.9GB of objects). None of these change runtime
+# behaviour.
 
 on:
   push:
@@ -29,7 +32,7 @@ jobs:
   build:
     name: v142 (MSVC 14.29) LDPlayer-compatible build
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
     - uses: actions/checkout@v6
@@ -46,27 +49,78 @@ jobs:
     - name: Set up MSBuild
       uses: microsoft/setup-msbuild@v3
 
-    - name: Build injection components (x64 + x86, no UI)
+    - name: Install sccache
       shell: powershell
       run: |
-        $bp = @(
-          "renderdoc\3rdparty\breakpad\client\windows\common.vcxproj",
-          "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj",
-          "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj",
-          "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj"
+        curl.exe -L -o sccache.zip https://github.com/mozilla/sccache/releases/download/v0.20.0/sccache-v0.20.0-x86_64-pc-windows-msvc.zip
+        7z x sccache.zip -y -osccache-bin | Out-Null
+        $exe = Get-ChildItem sccache-bin -Recurse -Filter sccache.exe | Select-Object -First 1
+        Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_BIN_DIR=$($exe.DirectoryName)"
+        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_DIR=$env:RUNNER_TEMP\sccache"
+        Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_CACHE_SIZE=8G"
+        "sccache at $($exe.FullName)"
+
+    - name: Cache sccache data
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/sccache
+        key: sccache-v142-1429-${{ github.sha }}
+        restore-keys: |
+          sccache-v142-1429-
+
+    - name: Apply CI-only build tweaks (no /Zi, no PCH, no LTCG)
+      shell: powershell
+      run: |
+        @'
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <ItemDefinitionGroup>
+            <ClCompile>
+              <DebugInformationFormat>None</DebugInformationFormat>
+              <PrecompiledHeader>NotUsing</PrecompiledHeader>
+              <WholeProgramOptimization>false</WholeProgramOptimization>
+            </ClCompile>
+            <Link>
+              <GenerateDebugInformation>false</GenerateDebugInformation>
+            </Link>
+          </ItemDefinitionGroup>
+        </Project>
+        '@ | Out-File -FilePath Directory.Build.targets -Encoding ascii
+
+    - name: Build x64 injection components (sccache)
+      shell: cmd
+      run: |
+        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products Microsoft.VisualStudio.Product.Community -property installationPath`) do set VSCOMM=%%i
+        call "%VSCOMM%\Common7\Tools\VsDevCmd.bat" -arch=x64 -vcvars_ver=14.29 || exit /b 1
+        cl 2>&1 | findstr /C:"Version" || exit /b 1
+        sccache --start-server || exit /b 1
+        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v142 /p:CLToolExe=sccache.exe /p:CLToolPath="%SCCACHE_BIN_DIR%"
+        for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
+          msbuild %%p %MSB% || exit /b 1
         )
-        foreach($platform in @("x64", "x86")) {
-          foreach($p in $bp) {
-            msbuild $p /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
-            if($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          msbuild renderdoc\renderdoc.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
-          if($LASTEXITCODE -ne 0) { exit 1 }
-          msbuild renderdoccmd\renderdoccmd.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
-          if($LASTEXITCODE -ne 0) { exit 1 }
-          msbuild renderdocshim\renderdocshim.vcxproj /m /p:SolutionDir=$pwd\ /p:Configuration=Release /p:Platform=$platform /p:PlatformToolset=v142
-          if($LASTEXITCODE -ne 0) { exit 1 }
-        }
+        msbuild renderdoc\renderdoc.vcxproj %MSB% || exit /b 1
+        msbuild renderdoccmd\renderdoccmd.vcxproj %MSB% || exit /b 1
+        msbuild renderdocshim\renderdocshim.vcxproj %MSB% || exit /b 1
+
+    - name: Build x86 injection components (sccache)
+      shell: cmd
+      run: |
+        for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products Microsoft.VisualStudio.Product.Community -property installationPath`) do set VSCOMM=%%i
+        call "%VSCOMM%\Common7\Tools\VsDevCmd.bat" -arch=x86 -vcvars_ver=14.29 || exit /b 1
+        cl 2>&1 | findstr /C:"Version" || exit /b 1
+        set MSB=/m /p:SolutionDir=%CD%\ /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v142 /p:CLToolExe=sccache.exe /p:CLToolPath="%SCCACHE_BIN_DIR%"
+        for %%p in ("renderdoc\3rdparty\breakpad\client\windows\common.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_client.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\crash_generation\crash_generation_server.vcxproj" "renderdoc\3rdparty\breakpad\client\windows\handler\exception_handler.vcxproj") do (
+          msbuild %%p %MSB% || exit /b 1
+        )
+        msbuild renderdoc\renderdoc.vcxproj %MSB% || exit /b 1
+        msbuild renderdoccmd\renderdoccmd.vcxproj %MSB% || exit /b 1
+        msbuild renderdocshim\renderdocshim.vcxproj %MSB% || exit /b 1
+
+    - name: Show sccache stats
+      shell: cmd
+      run: |
+        sccache --show-stats
+        sccache --stop-server
 
     - name: Verify toolset used for the build
       shell: cmd
@@ -93,27 +147,36 @@ jobs:
         x64\Release\renderdoccmd.exe version
         if($LASTEXITCODE -ne 0) { exit 1 }
 
+    - name: Cache the YiMeng official zip
+      uses: actions/cache@v4
+      with:
+        path: YiMeng.zip
+        key: yimeng-v1.47-64
+
     - name: Assemble complete LD release (overlay on the official YiMeng v1.47 zip)
       shell: powershell
       run: |
-        curl.exe -L https://github.com/Yi-Meng/renderdoc/releases/download/v1.47/RenderDoc_1.47_YiMeng_64.zip -o YiMeng.zip
-        7z x YiMeng.zip -oldir release
+        if(-not (Test-Path YiMeng.zip)) {
+          curl.exe -L https://github.com/Yi-Meng/renderdoc/releases/download/v1.47/RenderDoc_1.47_YiMeng_64.zip -o YiMeng.zip
+        }
+        Expand-Archive YiMeng.zip -DestinationPath release -Force
 
         # overlay the freshly built injection components
-        copy x64\Release\renderdoc.dll release\renderdoc.dll /Y
-        copy x64\Release\renderdoccmd.exe release\renderdoccmd.exe /Y
-        copy x64\Release\renderdocshim64.dll release\renderdocshim64.dll /Y
-        copy x64\Release\renderdoc.json release\renderdoc.json /Y
-        copy x86\Release\renderdoc.dll release\x86\renderdoc.dll /Y
-        copy x86\Release\renderdoccmd.exe release\x86\renderdoccmd.exe /Y
-        copy x86\Release\renderdocshim32.dll release\x86\renderdocshim32.dll /Y
-        copy x86\Release\renderdoc.json release\x86\renderdoc.json /Y
+        Copy-Item x64\Release\renderdoc.dll release\renderdoc.dll -Force
+        Copy-Item x64\Release\renderdoccmd.exe release\renderdoccmd.exe -Force
+        Copy-Item x64\Release\renderdocshim64.dll release\renderdocshim64.dll -Force
+        Copy-Item x64\Release\renderdoc.json release\renderdoc.json -Force
+        Copy-Item x86\Release\renderdoc.dll release\x86\renderdoc.dll -Force
+        Copy-Item x86\Release\renderdoccmd.exe release\x86\renderdoccmd.exe -Force
+        Copy-Item x86\Release\renderdocshim32.dll release\x86\renderdocshim32.dll -Force
+        Copy-Item x86\Release\renderdoc.json release\x86\renderdoc.json -Force
 
         $sha = git rev-parse --short HEAD
         $fname = "RenderDoc_1.47_LD_64_$sha.zip"
-        7z a -tzip $fname release
-        "FNAME=$fname" | Out-File -FilePath $env:GITHUB_ENV -Append
-        dir $fname
+        if(Test-Path $fname) { Remove-Item $fname -Force }
+        7z a -tzip $fname .\release\* | Out-Null
+        Add-Content -Path $env:GITHUB_ENV -Value "FNAME=$fname"
+        Get-Item $fname | Select-Object Name,Length
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v4
