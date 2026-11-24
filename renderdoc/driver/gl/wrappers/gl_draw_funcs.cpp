@@ -4923,6 +4923,8 @@ void WrappedOpenGL::glFlush()
 
     GetContextRecord()->AddChunk(scope.Get());
   }
+
+  DriveOffscreenCaptureTick();
 }
 
 template <typename SerialiserType>
@@ -4962,6 +4964,8 @@ void WrappedOpenGL::glFinish()
 
     GetContextRecord()->AddChunk(scope.Get());
   }
+
+  DriveOffscreenCaptureTick();
 }
 
 INSTANTIATE_FUNCTION_SERIALISED(void, glDispatchCompute, GLuint num_groups_x, GLuint num_groups_y,

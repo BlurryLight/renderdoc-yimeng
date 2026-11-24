@@ -147,6 +147,8 @@ private:
   // have no frame boundary to poll for capture triggers, so we drive the
   // capture from frequently-called GL entry points instead.
   void DriveOffscreenCapture();
+  void DriveOffscreenCaptureTick();
+  void EndOffscreenCapture();
 
   // internals
   CaptureState m_State;
@@ -157,8 +159,9 @@ private:
   PerformanceTimer m_CaptureTimer;
 
   bool m_OffscreenCapturing = false;
+  bool m_OffscreenEndPending = false;
   void *m_OffscreenCaptureDevice = NULL;
-  double m_OffscreenCaptureMs = 100.0;
+  double m_OffscreenCaptureMs = 1200.0;
   PerformanceTimer m_OffscreenCaptureTimer;
 
   bool m_MarkedActive = false;

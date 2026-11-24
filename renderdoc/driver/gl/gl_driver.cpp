@@ -2692,6 +2692,37 @@ bool WrappedOpenGL::DiscardFrameCapture(DeviceOwnedWindow devWnd)
   return true;
 }
 
+void WrappedOpenGL::EndOffscreenCapture()
+{
+  m_OffscreenCapturing = false;
+  m_OffscreenEndPending = false;
+  RDCLOG("Offscreen bridge: ending capture on device %p after %.1fms",
+         m_OffscreenCaptureDevice, m_OffscreenCaptureTimer.GetMilliseconds());
+  RenderDoc::Inst().EndFrameCapture(DeviceOwnedWindow(m_OffscreenCaptureDevice, NULL));
+
+  // end the captures on the host-side Vulkan instances too - in emulator
+  // hosts the real drawing happens on Vulkan rendering to an offscreen
+  // object, while the GL traffic is only the outer composition/present.
+  // This mirrors WrappedVulkan::EndVulkanBridgeCaptures() but is driven
+  // from the GL side instead of a Vulkan present that never comes.
+  rdcarray<IFrameCapturer *> bridgeCapturers = RenderDoc::Inst().GetVulkanBridgeCapturers();
+  for(IFrameCapturer *cap : bridgeCapturers)
+  {
+    RDCLOG("Offscreen bridge: ending Vulkan capturer %p", cap);
+    cap->EndFrameCapture(DeviceOwnedWindow(NULL, NULL));
+  }
+}
+
+void WrappedOpenGL::DriveOffscreenCaptureTick()
+{
+  // called from glFinish/glFlush: these mark the end of the host's per-frame
+  // composition, which is the closest thing to a frame boundary an offscreen
+  // host has. If the capture window has elapsed, end the captures here so
+  // they stop on a whole frame instead of slicing one mid-flight.
+  if(m_OffscreenEndPending)
+    EndOffscreenCapture();
+}
+
 void WrappedOpenGL::DriveOffscreenCapture()
 {
   // Offscreen/headless hosts (e.g. Android emulator host processes that render
@@ -2705,24 +2736,20 @@ void WrappedOpenGL::DriveOffscreenCapture()
   if(m_OffscreenCapturing)
   {
     double elapsed = m_OffscreenCaptureTimer.GetMilliseconds();
-    if(elapsed >= m_OffscreenCaptureMs)
+    if(!m_OffscreenEndPending && elapsed >= m_OffscreenCaptureMs)
     {
-      m_OffscreenCapturing = false;
-      RDCLOG("Offscreen bridge: ending capture on device %p after %.1fms",
-             m_OffscreenCaptureDevice, elapsed);
-      RenderDoc::Inst().EndFrameCapture(DeviceOwnedWindow(m_OffscreenCaptureDevice, NULL));
-
-      // end the captures on the host-side Vulkan instances too - in emulator
-      // hosts the real drawing happens on Vulkan rendering to an offscreen
-      // object, while the GL traffic is only the outer composition/present.
-      // This mirrors WrappedVulkan::EndVulkanBridgeCaptures() but is driven
-      // from the GL side instead of a Vulkan present that never comes.
-      rdcarray<IFrameCapturer *> bridgeCapturers = RenderDoc::Inst().GetVulkanBridgeCapturers();
-      for(IFrameCapturer *cap : bridgeCapturers)
-      {
-        RDCLOG("Offscreen bridge: ending Vulkan capturer %p", cap);
-        cap->EndFrameCapture(DeviceOwnedWindow(NULL, NULL));
-      }
+      // hold the end until the next frame tick (glFinish/glFlush) so the
+      // capture stops on a whole frame boundary
+      m_OffscreenEndPending = true;
+      RDCLOG("Offscreen bridge: capture window elapsed after %.1fms, deferring end to next "
+             "frame tick",
+             elapsed);
+    }
+    else if(m_OffscreenEndPending && elapsed >= m_OffscreenCaptureMs + 500.0)
+    {
+      // no frame tick arrived - end anyway rather than hanging forever
+      RDCLOG("Offscreen bridge: no frame tick seen, ending capture anyway");
+      EndOffscreenCapture();
     }
     return;
   }
@@ -2741,7 +2768,7 @@ void WrappedOpenGL::DriveOffscreenCapture()
     if(ctx == NULL)
       return;
 
-    m_OffscreenCaptureMs = 100.0;
+    m_OffscreenCaptureMs = 1200.0;
     rdcstr env = Process::GetEnvVariable("RENDERDOC_OFFSCREEN_CAPTURE_MS");
     if(!env.empty())
     {
