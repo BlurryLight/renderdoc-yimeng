@@ -142,12 +142,16 @@ private:
   // start, then track changes while frame capturing
   bool RecordUpdateCheck(GLResourceRecord *record);
 
-  // Offscreen/headless capture driving: hosts that never do a windowed present
-  // (e.g. Android emulator host processes rendering to an offscreen surface)
-  // have no frame boundary to poll for capture triggers, so we drive the
-  // capture from frequently-called GL entry points instead.
+  // Offscreen/headless capture driving: hosts that never get a *windowed*
+  // present still do call wglSwapBuffers/eglSwapBuffers for their composition,
+  // they are just not registered as an active capture window. So the trigger is
+  // polled from frequently-called GL entry points, but the capture itself is
+  // only started at the next present so it begins on a frame boundary and only
+  // ended a couple of presents later so at least one whole frame is recorded.
   void DriveOffscreenCapture();
   void DriveOffscreenCaptureTick();
+  void DriveOffscreenCaptureOnPresent(void *windowHandle);
+  void BeginOffscreenCapture();
   void EndOffscreenCapture();
 
   // internals
@@ -160,9 +164,17 @@ private:
 
   bool m_OffscreenCapturing = false;
   bool m_OffscreenEndPending = false;
+  bool m_OffscreenStartPending = false;
   void *m_OffscreenCaptureDevice = NULL;
-  double m_OffscreenCaptureMs = 1200.0;
+  // safety net only: the capture normally ends after m_OffscreenPresentTarget
+  // presents (frame boundaries), not after a wall-clock duration. A fixed
+  // duration is wrong here because saving the initial resource state can take
+  // longer than the window and then only a slice of a frame is recorded.
+  double m_OffscreenCaptureMs = 60000.0;
+  uint32_t m_OffscreenPresentCount = 0;
+  uint32_t m_OffscreenPresentTarget = 2;
   PerformanceTimer m_OffscreenCaptureTimer;
+  PerformanceTimer m_OffscreenArmTimer;
 
   bool m_MarkedActive = false;
 

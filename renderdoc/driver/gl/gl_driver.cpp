@@ -2078,6 +2078,12 @@ void WrappedOpenGL::SwapBuffers(WindowingSystem winSystem, void *windowHandle)
 
   m_FrameCounter++;    // first present becomes frame #1, this function is at the end of the frame
 
+  // offscreen/headless hosts present to a window that isn't registered as an
+  // active capture window, so the capture start/stop below never happens for
+  // them. Use this present as a frame boundary for the offscreen capture
+  // driver instead - see DriveOffscreenCapture().
+  DriveOffscreenCaptureOnPresent(windowHandle);
+
   ContextData &ctxdata = GetCtxData();
 
   // we only handle context-window associations here as it's too common to
@@ -2696,8 +2702,10 @@ void WrappedOpenGL::EndOffscreenCapture()
 {
   m_OffscreenCapturing = false;
   m_OffscreenEndPending = false;
-  RDCLOG("Offscreen bridge: ending capture on device %p after %.1fms",
-         m_OffscreenCaptureDevice, m_OffscreenCaptureTimer.GetMilliseconds());
+  m_OffscreenStartPending = false;
+  RDCLOG("Offscreen bridge: ending capture on device %p after %.1fms (%u presents)",
+         m_OffscreenCaptureDevice, m_OffscreenCaptureTimer.GetMilliseconds(),
+         m_OffscreenPresentCount);
   RenderDoc::Inst().EndFrameCapture(DeviceOwnedWindow(m_OffscreenCaptureDevice, NULL));
 
   // end the captures on the host-side Vulkan instances too - in emulator
@@ -2713,13 +2721,89 @@ void WrappedOpenGL::EndOffscreenCapture()
   }
 }
 
+void WrappedOpenGL::BeginOffscreenCapture()
+{
+  void *ctx = GetCtx().ctx;
+  if(ctx == NULL)
+  {
+    m_OffscreenStartPending = false;
+    RDCERR("Offscreen bridge: no GL context current, cannot start capture");
+    return;
+  }
+
+  // the capture is ended by the present counter, this timeout is only a safety
+  // net so a host that stops presenting doesn't leave us capturing forever
+  m_OffscreenCaptureMs = 60000.0;
+  rdcstr env = Process::GetEnvVariable("RENDERDOC_OFFSCREEN_CAPTURE_MS");
+  if(!env.empty())
+  {
+    double v = atof(env.c_str());
+    if(v > 0.0)
+      m_OffscreenCaptureMs = v;
+  }
+
+  m_OffscreenPresentTarget = 2;
+  env = Process::GetEnvVariable("RENDERDOC_OFFSCREEN_CAPTURE_PRESENTS");
+  if(!env.empty())
+  {
+    uint32_t v = (uint32_t)atoi(env.c_str());
+    if(v > 0)
+      m_OffscreenPresentTarget = v;
+  }
+
+  m_OffscreenCapturing = true;
+  m_OffscreenEndPending = false;
+  m_OffscreenStartPending = false;
+  m_OffscreenPresentCount = 0;
+  m_OffscreenCaptureDevice = ctx;
+  m_OffscreenCaptureTimer.Restart();
+
+  RDCLOG("Offscreen bridge: starting capture on device %p at a frame boundary, ending after %u "
+         "presents (safety timeout %.0fms)",
+         ctx, m_OffscreenPresentTarget, m_OffscreenCaptureMs);
+
+  RenderDoc::Inst().StartFrameCapture(DeviceOwnedWindow(ctx, NULL));
+
+  // start captures on the host-side Vulkan instances - see the comment in the
+  // end branch above for why the real drawing lives there in emulator hosts.
+  rdcarray<IFrameCapturer *> bridgeCapturers = RenderDoc::Inst().GetVulkanBridgeCapturers();
+  for(IFrameCapturer *cap : bridgeCapturers)
+  {
+    RDCLOG("Offscreen bridge: starting Vulkan capturer %p", cap);
+    cap->StartFrameCapture(DeviceOwnedWindow(NULL, NULL));
+  }
+}
+
+void WrappedOpenGL::DriveOffscreenCaptureOnPresent(void *windowHandle)
+{
+  if(m_OffscreenStartPending)
+  {
+    // this is the frame boundary we were waiting for - starting the capture
+    // here means the recorded frame begins at the start of a composition
+    // instead of in the middle of the workload that produced it.
+    RDCLOG("Offscreen bridge: present seen (window %p), starting capture here", windowHandle);
+    BeginOffscreenCapture();
+    return;
+  }
+
+  if(!m_OffscreenCapturing)
+    return;
+
+  m_OffscreenPresentCount++;
+
+  RDCLOG("Offscreen bridge: present %u/%u while capturing", m_OffscreenPresentCount,
+         m_OffscreenPresentTarget);
+
+  if(m_OffscreenPresentCount >= m_OffscreenPresentTarget)
+    EndOffscreenCapture();
+}
+
 void WrappedOpenGL::DriveOffscreenCaptureTick()
 {
-  // called from glFinish/glFlush: these mark the end of the host's per-frame
-  // composition, which is the closest thing to a frame boundary an offscreen
-  // host has. If the capture window has elapsed, end the captures here so
-  // they stop on a whole frame instead of slicing one mid-flight.
-  if(m_OffscreenEndPending)
+  // glFinish/glFlush also mark the end of a host composition. The capture is
+  // normally ended by the present counter, so this is only the safety net for
+  // hosts that flush but never present.
+  if(m_OffscreenCapturing && m_OffscreenCaptureTimer.GetMilliseconds() >= m_OffscreenCaptureMs)
     EndOffscreenCapture();
 }
 
@@ -2727,28 +2811,37 @@ void WrappedOpenGL::DriveOffscreenCapture()
 {
   // Offscreen/headless hosts (e.g. Android emulator host processes that render
   // to an offscreen surface and share it with a separate presenter process)
-  // never reach a windowed present, so the normal path that polls
-  // ShouldTriggerCapture() during Present is dead and a TriggerCapture from the
-  // UI just times out. Drive the capture from frequently-called GL entry points
-  // instead: start a device-only capture (NULL window, like the first-frame
-  // path) and end it after a short window covering a couple of frames.
+  // never get a *registered/active* windowed present, so the normal path that
+  // polls ShouldTriggerCapture() during Present is dead and a TriggerCapture
+  // from the UI just times out. Drive the trigger from frequently-called GL
+  // entry points instead.
+  //
+  // The capture itself must NOT be started here: these entry points run in the
+  // middle of a frame's workload, and starting here produced truncated captures
+  // that only contained the tail of a frame (no clears, no main GBuffer pass,
+  // almost no compute). Instead arm the capture and start it at the next
+  // present, which is the closest thing to a frame boundary these hosts have.
+
+  if(m_OffscreenStartPending)
+  {
+    // if the host never presents, fall back to starting immediately rather
+    // than waiting forever
+    if(m_OffscreenArmTimer.GetMilliseconds() > 5000.0 && IsBackgroundCapturing(m_State))
+    {
+      RDCLOG("Offscreen bridge: no present seen in %.0fms, starting capture immediately",
+             m_OffscreenArmTimer.GetMilliseconds());
+      BeginOffscreenCapture();
+    }
+    return;
+  }
 
   if(m_OffscreenCapturing)
   {
-    double elapsed = m_OffscreenCaptureTimer.GetMilliseconds();
-    if(!m_OffscreenEndPending && elapsed >= m_OffscreenCaptureMs)
+    // safety net in case presents stop arriving
+    if(m_OffscreenCaptureTimer.GetMilliseconds() >= m_OffscreenCaptureMs)
     {
-      // hold the end until the next frame tick (glFinish/glFlush) so the
-      // capture stops on a whole frame boundary
-      m_OffscreenEndPending = true;
-      RDCLOG("Offscreen bridge: capture window elapsed after %.1fms, deferring end to next "
-             "frame tick",
-             elapsed);
-    }
-    else if(m_OffscreenEndPending && elapsed >= m_OffscreenCaptureMs + 500.0)
-    {
-      // no frame tick arrived - end anyway rather than hanging forever
-      RDCLOG("Offscreen bridge: no frame tick seen, ending capture anyway");
+      RDCLOG("Offscreen bridge: safety timeout after %.0fms, ending capture",
+             m_OffscreenCaptureTimer.GetMilliseconds());
       EndOffscreenCapture();
     }
     return;
@@ -2764,36 +2857,9 @@ void WrappedOpenGL::DriveOffscreenCapture()
 
   if(RenderDoc::Inst().ShouldTriggerCapture(0))
   {
-    void *ctx = GetCtx().ctx;
-    if(ctx == NULL)
-      return;
-
-    m_OffscreenCaptureMs = 1200.0;
-    rdcstr env = Process::GetEnvVariable("RENDERDOC_OFFSCREEN_CAPTURE_MS");
-    if(!env.empty())
-    {
-      double v = atof(env.c_str());
-      if(v > 0.0)
-        m_OffscreenCaptureMs = v;
-    }
-
-    m_OffscreenCapturing = true;
-    m_OffscreenCaptureDevice = ctx;
-    m_OffscreenCaptureTimer.Restart();
-
-    RDCLOG("Offscreen bridge: trigger received, starting capture on device %p for %.1fms", ctx,
-           m_OffscreenCaptureMs);
-
-    RenderDoc::Inst().StartFrameCapture(DeviceOwnedWindow(ctx, NULL));
-
-    // start captures on the host-side Vulkan instances - see the comment in the
-    // end branch above for why the real drawing lives there in emulator hosts.
-    rdcarray<IFrameCapturer *> bridgeCapturers = RenderDoc::Inst().GetVulkanBridgeCapturers();
-    for(IFrameCapturer *cap : bridgeCapturers)
-    {
-      RDCLOG("Offscreen bridge: starting Vulkan capturer %p", cap);
-      cap->StartFrameCapture(DeviceOwnedWindow(NULL, NULL));
-    }
+    m_OffscreenStartPending = true;
+    m_OffscreenArmTimer.Restart();
+    RDCLOG("Offscreen bridge: trigger received, deferring capture start to the next present");
   }
 }
 
